@@ -1,0 +1,9 @@
+# dataset.yaml
+train: /home/xingxun/experment/uav_yolo/yolo_dataset/train/images
+val: /home/xingxun/experment/uav_yolo/yolo_dataset/valid/images
+
+# Number of classes
+nc: 1
+
+# Class names
+names: ['uav']
