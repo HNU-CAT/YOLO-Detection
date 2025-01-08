@@ -81,7 +81,7 @@ def image_callback(msg):
     try:
         cv_image = bridge.imgmsg_to_cv2(msg, "bgr8")
         # 使用 YOLO 进行目标检测
-        results = model.predict(source=cv_image, conf=0.5, save=False, show=False, verbose=False)
+        results = model.predict(source=cv_image, conf=0.5, save=False, show=True, verbose=False)
         detections = results[0].boxes.data.cpu().numpy()  # 获取检测结果 [x1, y1, x2, y2, confidence, class]
 
         # 创建深度图像副本
@@ -100,7 +100,7 @@ def image_callback(msg):
             X = (cx - cx_offset) * depth / fx
             Y = (cy - cy_offset) * depth / fy
             Z = depth
-    
+            margin = 10  # 设置扩展框的大小，单位：像素
             # 转换到全局坐标系
             global_coords = transform_to_global(X, Y, Z)
             if global_coords is not None:
@@ -117,8 +117,15 @@ def image_callback(msg):
                 detected_position.header.stamp = rospy.Time.now()
                 detected_position.header.frame_id = f"target_{target_id}"  # 使用target_id作为标识
                 position_pub.publish(detected_position)  # 发布目标位置
-            x1, y1, x2, y2 = map(int, [x1, y1, x2, y2])
-            depth_image_copy[y1:y2, x1:x2] = 0
+                x1, y1, x2, y2 = map(int, [x1, y1, x2, y2])
+
+                # 扩展边界框，增加 margin
+                x1 = max(0, x1 - margin)  # 防止超出图像左边界
+                y1 = max(0, y1 - margin)  # 防止超出图像上边界
+                x2 = min(cv_image.shape[1], x2 + margin)  # 防止超出图像右边界
+                y2 = min(cv_image.shape[0], y2 + margin)  # 防止超出图像下边界
+                depth_image_copy[y1:y2, x1:x2] = 0  # 将扩展后的框区域置为 0
+
         depth_image_msg = bridge.cv2_to_imgmsg(depth_image_copy, encoding="passthrough")
         depth_image_msg.header.stamp = rospy.Time.now()
         depth_image_msg.header.frame_id = "camera_frame"  # 根据实际情况设置坐标系
@@ -138,7 +145,7 @@ def main():
     position_pub = rospy.Publisher('/drone/position', PoseStamped, queue_size=10)  # 创建发布者
     
     global depth_image_pub
-    depth_image_pub = rospy.Publisher('/drone/modified_depth_image', Image, queue_size=10)
+    depth_image_pub = rospy.Publisher('/iris_0/modified_depth_image', Image, queue_size=10)
     rospy.spin()
 
 if __name__ == "__main__":

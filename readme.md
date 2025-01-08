@@ -13,3 +13,7 @@ RGB原始图像
 <img src="files/modfied_depth.jpg" alt="处理后的深度图" width="400"/>
 
 处理后的深度图
+
+<img src="files/map.jpg" alt="处理后的深度图" width="400"/>
+
+对建图的影响
