@@ -1,8 +1,0 @@
-prefix=/home/xingxun/experment/Depth2Pose/install
-
-Name: d2p
-Description: Description of d2p
-Version: 0.0.1
-Cflags: -I/usr/include/eigen3
-Libs: -L${prefix}/lib 
-Requires: roscpp std_msgs sensor_msgs geometry_msgs nav_msgs visualization_msgs vision_msgs cv_bridge image_transport pcl_ros pcl_conversions
