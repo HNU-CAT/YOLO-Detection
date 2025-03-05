@@ -1,0 +1,2 @@
+d2p
+-DCATKIN_DEVEL_PREFIX=/home/xingxun/experment/Depth2Pose/devel -DCMAKE_INSTALL_PREFIX=/home/xingxun/experment/Depth2Pose/install -G Unix Makefiles
