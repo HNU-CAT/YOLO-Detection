@@ -1,0 +1,56 @@
+
+  # 深度图参数
+  depth_scale: 1000.0
+  depth_filter_margin: 5  # 减小滤波边距，因为目标更小
+  depth_min_value: 0.2
+  depth_max_value: 10.0  # 增加最大检测距离，因为无人机可能飞得更远
+
+  # 目标尺寸参数（无人机尺寸）
+  target_size_x: 0.2  # 无人机宽度（米）
+  target_size_y: 0.2  # 无人机长度（米）
+  target_size_z: 0.1  # 无人机高度（米）
+  min_target_size: 0.1  # 最小目标尺寸（米）
+  max_target_size: 0.5  # 最大目标尺寸（米）
+
+  # 相机内参
+  color_intrinsics: [607.1984252929688, 607.1984252929688, 324.0283203125, 244.63427734375]
+
+  # 目标跟踪参数
+  max_tracking_distance: 4.0  # 最大跟踪距离（米）
+  max_history_size: 50  # 轨迹历史长度
+  min_tracking_confidence: 0.6  # 最小跟踪置信度
+  max_tracking_velocity: 5.0  # 最大跟踪速度（米/秒）
+  max_tracking_acceleration: 2.0  # 最大跟踪加速度（米/秒²）
+
+  # 图像尺寸
+  img_rows: 480
+  img_cols: 640
+
+  # 话题名称
+  topics:
+    depth_image: "/camera/depth/image_rect_raw"
+    detections: "/yolo_detector/detected_bounding_boxes"
+    # odometry: "/fake_odom"
+    odometry: "/fake_odom"
+    target_position: "/target_3d_position"
+    bbox_visualization: "/yolo_3d_bboxes"
+    depth_visualization: "/filtered_depth_image"
+    trajectory_visualization: "/target_trajectories"
+
+  # 话题队列大小
+  queue_sizes:
+    depth_image: 10
+    detections: 100
+    odometry: 30
+    visualization: 10
+
+  # 相机到机体的变换矩阵
+  transforms:
+    body_to_cam: [1.0, 0.0, 0.0, 0.065,
+                  0.0, 1.0, 0.0, 0.01,
+                  0.0, 0.0, 1.0, 0.12,
+                  0.0, 0.0, 0.0, 1.0]
+    body_to_cam_color: [1.0, 0.0, 0.0, 0.065,
+                        0.0, 1.0, 0.0, 0.025,
+                        0.0, 0.0, 1.0, 0.12,
+                        0.0, 0.0, 0.0, 1.0] 

@@ -15,32 +15,52 @@ find_package(catkin REQUIRED COMPONENTS
   vision_msgs
   cv_bridge
   image_transport
-  pcl_ros
-  pcl_conversions
+  message_filters
+  tf2
+  tf2_ros
+  eigen_conversions
 )
+
+## 查找 OpenCV
+find_package(OpenCV REQUIRED)
 
 ## 查找 Eigen
 find_package(Eigen3 REQUIRED)
 
 ## 生成 catkin 包
 catkin_package(
+  INCLUDE_DIRS include
   CATKIN_DEPENDS roscpp std_msgs sensor_msgs geometry_msgs nav_msgs 
                  visualization_msgs vision_msgs cv_bridge image_transport 
-                 pcl_ros pcl_conversions
+                 message_filters tf2 tf2_ros eigen_conversions
   DEPENDS EIGEN3
 )
 
 ## 包含头文件目录
 include_directories(
+  include
   ${catkin_INCLUDE_DIRS}
-  ${EIGEN3_INCLUDE_DIRS}
+  ${OpenCV_INCLUDE_DIRS}
+  ${EIGEN3_INCLUDE_DIR}
 )
 
 ## 添加可执行文件
-add_executable(d2p_node src/main.cpp)
+add_executable(target_detector
+  src/main.cpp
+  src/target_detector.cpp
+)
 
 ## 指定可执行文件需要链接的库
-target_link_libraries(d2p_node
+target_link_libraries(target_detector
   ${catkin_LIBRARIES}
-  ${PCL_LIBRARIES}
+  ${OpenCV_LIBS}
+)
+
+install(TARGETS target_detector
+  RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)
+
+install(DIRECTORY include/${PROJECT_NAME}/
+  DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION}
+  FILES_MATCHING PATTERN "*.h"
 )

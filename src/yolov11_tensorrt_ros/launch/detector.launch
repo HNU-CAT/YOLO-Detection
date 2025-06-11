@@ -1,0 +1,10 @@
+<launch>
+    <arg name="config" default="$(find yolo_detector_node)/config/yolov11n.yaml"/>
+    <node pkg="yolo_detector_node" type="yolo_detector" name="yolo_detector" output="screen">
+        <param name="config_file" type="string" value="$(arg config)"/>
+    </node>
+    <!-- TO run yolo v11: pip install ultralytics -->
+    <!-- <node pkg="onboard_detector_node" type="yolov11_detector_node.py" name="yolov11_detector_node" output="screen" /> -->
+	<!-- <node name="rviz" pkg="rviz" type="rviz" args="-d $(find onboard_detector)/rviz/detector.rviz"/> -->
+	<!-- <node name="rviz" pkg="rviz" type="rviz" args="-d $(find onboard_detector_whd)/rviz/detector_lv.rviz"/> -->
+</launch>

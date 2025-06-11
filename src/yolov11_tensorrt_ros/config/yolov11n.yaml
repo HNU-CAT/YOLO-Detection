@@ -1,0 +1,26 @@
+%YAML:1.0
+use_ros: 1 # if 1 set your image_topic,else 0 set your image path
+image_topic: "/camera/color/image_raw"
+image_path: "/home/hnu/data"
+# tensorrt init parameters
+yolov11_tensorrt_config:
+  kGpuId: 0
+  kNumClass: 1
+  kInputH: 640 # model inference height
+  kInputW: 640 # model inference width
+  kNmsThresh: 0.65
+  kConfThresh: 0.5
+  kMaxNumOutputBbox: 50 # assume the box outputs no more than kMaxNumOutputBbox boxes that conf >= kNmsThresh
+  kNumBoxElement: 7 # left, top, right, bottom, confidence, class, keepflag(whether drop when NMS)
+  use_FP16_Mode: 1 # FP16 mode
+  use_INT8_Mode: 0 # INT8 mode
+  cacheFile: "./int8.cache" # if use_INT8_Mode is 1,it need set
+  calibrationDataPath: "../calibrator" # if use_INT8_Mode is 1,it need set
+  # you can use ./onnx_model/export.py to export your onnx model from pt model.
+  onnxFile: "/home/hnu/experiment/Depth2Pose/src/yolov11_tensorrt_ros/onnx_model/yolo11n/best.onnx" # please export onnx to float32,
+  trtFile: "/home/hnu/experiment/Depth2Pose/src/yolov11_tensorrt_ros/onnx_model/yolo11n/best.plan" # if has't .plan,first run will creat a trtfile on onnxFile
+  # detect classes name
+  vClassNames:
+    - "person"
+
+output_path: "/home/hnu/experiment/Depth2Pose/src/yolov11_tensorrt_ros"

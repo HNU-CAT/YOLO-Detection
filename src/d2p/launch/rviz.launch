@@ -1,0 +1,6 @@
+<?xml version="1.0"?>
+<launch>
+    <!-- 启动RViz可视化 -->
+    <node name="rviz" pkg="rviz" type="rviz" args="-d $(find d2p)/rviz/detector.rviz"/>
+
+</launch>

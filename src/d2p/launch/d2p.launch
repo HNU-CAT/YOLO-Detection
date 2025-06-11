@@ -1,10 +1,17 @@
+<?xml version="1.0"?>
 <launch>
-    <!-- 启动 d2p_node -->
-    <node name="d2p_node" pkg="d2p" type="d2p_node" output="screen">
-        <!-- 你可以在这里添加任何必要的参数 -->
-        <!-- 例如，如果 d2p_node 需要特定的参数，可以在此添加 -->
-        <!-- <param name="param_name" value="param_value" /> -->
+
+    <!-- 加载参数文件 -->
+    <rosparam command="load" file="$(find d2p)/config/detector_params.yaml" ns="/target_detector"/>
+
+    <!-- 设置日志级别 -->
+    <env name="ROSCONSOLE_CONFIG_FILE" value="$(find d2p)/config/rosconsole.conf"/>
+
+    <!-- 启动目标检测节点 -->
+    <node pkg="d2p" type="target_detector" name="target_detector" output="screen">
+        <!-- 设置日志级别 -->
+        <env name="ROSCONSOLE_MIN_SEVERITY" value="DEBUG"/>
     </node>
 
-    <node name="rviz" pkg="rviz" type="rviz" args="-d $(find d2p)/rviz/detector.rviz"/>
+
 </launch>
