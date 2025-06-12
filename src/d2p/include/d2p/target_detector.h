@@ -18,6 +18,7 @@
 #include <mutex>
 #include <deque>
 #include <unordered_map>
+#include "d2p/Tracker.h"
 
 namespace d2p {
 
@@ -35,9 +36,8 @@ struct Target3D {
     std::deque<Eigen::Vector3d> position_history;
     std::deque<ros::Time> time_history;
     
-    // Kalman filter state
-    Eigen::Matrix<double, 9, 1> state;  // [x, y, z, vx, vy, vz, ax, ay, az]
-    Eigen::Matrix<double, 9, 9> covariance;
+    // Kalman filter tracker
+    std::shared_ptr<Tracker> kf_tracker;
 };
 
 class TargetDetector {
@@ -133,18 +133,14 @@ private:
     
     void processDepthImage(const cv::Mat& input, cv::Mat& output);
     void publishDepthVisualization(const cv::Mat& depth_image);
-    void estimateTarget3D(const vision_msgs::Detection2D& detection,
+    bool estimateTarget3D(const vision_msgs::Detection2D& detection,
                          const cv::Mat& depth_image,
-                         Target3D& target);
+                         Eigen::Vector3d& world_center,
+                         Eigen::Vector3d& size_body);
     void updateTargetTracking();
-    void predictTargetPositions();
     void publishVisualization();
     
     // Helper functions
-    void calculateMAD(const std::vector<double>& values,
-                     const std::vector<double>& weights,
-                     double& median,
-                     double& mad);
     void transformBBox(const Eigen::Vector3d& center,
                       const Eigen::Vector3d& size,
                       const Eigen::Vector3d& position,
@@ -158,11 +154,6 @@ private:
                      const ros::Publisher& publisher,
                      double r, double g, double b);
     void publishTrajectory(const Target3D& target);
-    
-    // Kalman filter methods
-    void initializeKalmanFilter(Target3D& target);
-    void predictKalmanFilter(Target3D& target, double dt);
-    void updateKalmanFilter(Target3D& target, const Eigen::Vector3d& measurement);
 };
 
 } // namespace d2p 

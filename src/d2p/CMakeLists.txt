@@ -48,6 +48,8 @@ include_directories(
 add_executable(target_detector
   src/main.cpp
   src/target_detector.cpp
+  src/Tracker.cpp
+  src/TrackerState.cpp
 )
 
 ## 指定可执行文件需要链接的库

@@ -1,6 +1,8 @@
 #include "d2p/target_detector.h"
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/LinearMath/Matrix3x3.h>
+#include <limits>
+#include "d2p/Tracker.h"
 
 namespace d2p {
 
@@ -334,407 +336,224 @@ void TargetDetector::syncCallback(const sensor_msgs::ImageConstPtr& depth_msg,
         return;
     }
 
-    // 检查深度图像消息
-    if (!depth_msg) {
-        ROS_ERROR_THROTTLE(1.0,"Received null depth image message!");
-        return;
-    }
-
-    // 检查检测消息
-    if (!detections) {
-        ROS_ERROR_THROTTLE(1.0,"Received null detections message!");
-        return;
-    }
-
     try {
-        // 处理深度图像
-        cv_bridge::CvImagePtr cv_ptr;
-        try {
-            cv_ptr = cv_bridge::toCvCopy(depth_msg, depth_msg->encoding);
-            if (!cv_ptr || cv_ptr->image.empty()) {
-                ROS_ERROR("Failed to convert depth image or empty image");
-                return;
-            }
-            // ROS_DEBUG("Successfully converted depth image, size: %dx%d", 
-            //          cv_ptr->image.cols, cv_ptr->image.rows);
-        } catch (cv_bridge::Exception& e) {
-            ROS_ERROR("cv_bridge exception: %s", e.what());
-            return;
-        }
-
-        if(depth_msg->encoding == sensor_msgs::image_encodings::TYPE_32FC1) {
-            cv_ptr->image.convertTo(cv_ptr->image, CV_16UC1, depth_scale_);
-        }
-
+        cv_bridge::CvImagePtr cv_ptr = cv_bridge::toCvCopy(depth_msg, sensor_msgs::image_encodings::TYPE_16UC1);
+        
         std::lock_guard<std::mutex> depth_lock(depth_mutex_);
         processDepthImage(cv_ptr->image, aligned_depth_image_);
 
-        // 处理检测结果
-        if(detections->detections.empty()) {
-            ROS_INFO_THROTTLE(1.0, "No detections received");
-            return;
-        }
+        // 1. Predict step for all existing trackers
+        updateTargetTracking();
 
-        // 统计有效检测结果
-        size_t valid_detections = 0;
+        // 2. Extract measurements from detections
+        std::vector<Eigen::Vector3d> current_measurements;
+        std::vector<Eigen::Vector3d> measurement_sizes;
         for(const auto& detection : detections->detections) {
-            // 检查bbox是否有效
-            if(detection.bbox.size_x > 0 && detection.bbox.size_y > 0) {
-                // 检查坐标是否在图像范围内
-                if(detection.bbox.center.x >= 0 && detection.bbox.center.x < img_cols_ &&
-                   detection.bbox.center.y >= 0 && detection.bbox.center.y < img_rows_) {
-                    valid_detections++;
-                } else {
-                    ROS_WARN("Detection bbox center (%.2f, %.2f) out of image bounds (%dx%d)",
-                            detection.bbox.center.x, detection.bbox.center.y, img_cols_, img_rows_);
+            Eigen::Vector3d world_center;
+            Eigen::Vector3d size_body;
+            if(estimateTarget3D(detection, aligned_depth_image_, world_center, size_body)) {
+                current_measurements.push_back(world_center);
+                measurement_sizes.push_back(size_body);
+            }
+        }
+        
+        // 3. Data association (simple nearest neighbor)
+        std::vector<bool> matched_measurements(current_measurements.size(), false);
+        std::vector<int> track_to_meas_map(tracked_targets_.size(), -1);
+        
+        int track_idx = 0;
+        for(auto& pair : tracked_targets_) {
+            Target3D& target = pair.second;
+            if (!target.is_tracked) {
+                track_idx++;
+                continue;
+            }
+
+            double min_dist = max_tracking_distance_;
+            int best_match_idx = -1;
+
+            for(int i = 0; i < current_measurements.size(); ++i) {
+                if(matched_measurements[i]) continue;
+                
+                double dist = (Eigen::Vector3d(target.x, target.y, target.z) - current_measurements[i]).norm();
+                if(dist < min_dist) {
+                    min_dist = dist;
+                    best_match_idx = i;
                 }
             }
+            
+            if(best_match_idx != -1) {
+                track_to_meas_map[track_idx] = best_match_idx;
+                matched_measurements[best_match_idx] = true;
+            }
+            track_idx++;
         }
 
-        // ROS_INFO("Received %zu detections, %zu with valid bboxes", 
-        //          detections->detections.size(), valid_detections);
+        // 4. Update step
+        track_idx = 0;
+        for(auto& pair : tracked_targets_) {
+            int meas_idx = track_to_meas_map[track_idx];
+            if(meas_idx != -1) {
+                Target3D& target = pair.second;
+                TrackerState measurement_state;
+                measurement_state.position = current_measurements[meas_idx].cast<float>();
+                target.kf_tracker->update(measurement_state);
+                
+                TrackerState corrected_state = target.kf_tracker->getState();
+                target.x = corrected_state.position(0);
+                target.y = corrected_state.position(1);
+                target.z = corrected_state.position(2);
+                target.vx = corrected_state.velocity(0);
+                target.vy = corrected_state.velocity(1);
+                target.vz = corrected_state.velocity(2);
+                
+                target.x_width = measurement_sizes[meas_idx](0);
+                target.y_width = measurement_sizes[meas_idx](1);
+                target.z_width = measurement_sizes[meas_idx](2);
+                target.last_seen = ros::Time::now();
 
-        if(valid_detections == 0) {
-            ROS_WARN_THROTTLE(1.0, "All detections have invalid bboxes!");
-            return;
-        }
-
-        std::vector<Target3D> current_targets;
-        for(const auto& detection : detections->detections) {
-            // 检查bbox是否有效
-            if(detection.bbox.size_x <= 0 || detection.bbox.size_y <= 0) {
-                ROS_DEBUG_THROTTLE(1.0, "Skipping detection with invalid bbox");
-                continue;
-            }
-
-            // 检查坐标是否在图像范围内
-            if(detection.bbox.center.x < 0 || detection.bbox.center.x >= img_cols_ ||
-               detection.bbox.center.y < 0 || detection.bbox.center.y >= img_rows_) {
-                ROS_WARN("Skipping detection with bbox center (%.2f, %.2f) out of image bounds (%dx%d)",
-                        detection.bbox.center.x, detection.bbox.center.y, img_cols_, img_rows_);
-                continue;
-            }
-
-            try {
-                Target3D target;
-                estimateTarget3D(detection, aligned_depth_image_, target);
-                if(target.is_tracked) {
-                    current_targets.push_back(target);
-                    tracked_targets_[target.id] = target;
+                target.position_history.push_back(Eigen::Vector3d(target.x, target.y, target.z));
+                if(target.position_history.size() > max_history_size_) {
+                    target.position_history.pop_front();
                 }
-            } catch (const std::exception& e) {
-                ROS_ERROR("Exception in estimateTarget3D: %s", e.what());
-                continue;
-            } catch (...) {
-                ROS_ERROR("Unknown exception in estimateTarget3D");
-                continue;
             }
+            track_idx++;
         }
 
-        // 更新跟踪
-        // try {
-        //     updateTargetTracking();
-        // } catch (const std::exception& e) {
-        //     ROS_ERROR("Exception in updateTargetTracking: %s", e.what());
-        // } catch (...) {
-        //     ROS_ERROR("Unknown exception in updateTargetTracking");
-        // }
+        // 5. Create new trackers for unmatched detections
+        for(int i = 0; i < current_measurements.size(); ++i) {
+            if(!matched_measurements[i]) {
+                Target3D new_target;
+                new_target.id = next_target_id_++;
+                
+                TrackerState initial_state;
+                initial_state.position = current_measurements[i].cast<float>();
+                new_target.kf_tracker = std::make_shared<Tracker>(initial_state);
 
-        // 发布可视化
-        if (!current_targets.empty()) {
-            try {
-                publishVisualization();
-                // ROS_INFO("Published visualization for %zu targets", current_targets.size());
-            } catch (const std::exception& e) {
-                ROS_ERROR("Exception in publishVisualization: %s", e.what());
-            } catch (...) {
-                ROS_ERROR("Unknown exception in publishVisualization");
+                TrackerState state = new_target.kf_tracker->getState();
+                new_target.x = state.position(0);
+                new_target.y = state.position(1);
+                new_target.z = state.position(2);
+                new_target.vx = state.velocity(0);
+                new_target.vy = state.velocity(1);
+                new_target.vz = state.velocity(2);
+                
+                new_target.x_width = measurement_sizes[i](0);
+                new_target.y_width = measurement_sizes[i](1);
+                new_target.z_width = measurement_sizes[i](2);
+                
+                new_target.is_tracked = true;
+                new_target.timestamp = ros::Time::now();
+                new_target.last_seen = ros::Time::now();
+                new_target.position_history.push_back(Eigen::Vector3d(new_target.x, new_target.y, new_target.z));
+
+                tracked_targets_[new_target.id] = new_target;
             }
         }
+        
+        // 6. Publish visualization
+        publishVisualization();
 
     } catch (const std::exception& e) {
         ROS_ERROR("Exception in syncCallback: %s", e.what());
-    } catch (...) {
-        ROS_ERROR("Unknown exception in syncCallback");
     }
 }
 
-void TargetDetector::estimateTarget3D(const vision_msgs::Detection2D& detection,
+bool TargetDetector::estimateTarget3D(const vision_msgs::Detection2D& detection,
                                     const cv::Mat& depth_image,
-                                    Target3D& target) {
-    // 首先检查深度图像是否有效
-    if (depth_image.empty()) {
-        ROS_ERROR("Empty depth image!");
-        target.is_tracked = false;
-        return;
+                                    Eigen::Vector3d& world_center,
+                                    Eigen::Vector3d& size_body) {
+    if (depth_image.empty() || detection.bbox.size_x <= 0 || detection.bbox.size_y <= 0) {
+        return false;
     }
 
-    // 检查深度图像尺寸
-    if (depth_image.rows != img_rows_ || depth_image.cols != img_cols_) {
-        ROS_ERROR("Depth image size mismatch! Expected %dx%d, got %dx%d", 
-                 img_rows_, img_cols_, depth_image.rows, depth_image.cols);
-        target.is_tracked = false;
-        return;
-    }
-
-    // 检查检测框是否有效
-    if (detection.bbox.size_x <= 0 || detection.bbox.size_y <= 0) {
-        ROS_DEBUG_THROTTLE(1.0, "Detection has invalid bbox, skipping 3D estimation");
-        target.is_tracked = false;
-        return;
-    }
-
-    // 获取检测框，添加安全检查
     double center_x = detection.bbox.center.x;
     double center_y = detection.bbox.center.y;
     double size_x = detection.bbox.size_x;
     double size_y = detection.bbox.size_y;
 
-    // 确保坐标在有效范围内
     if (center_x < 0 || center_x >= img_cols_ || center_y < 0 || center_y >= img_rows_) {
-        ROS_ERROR("Detection center (%.2f, %.2f) out of image bounds (%dx%d)",
-                 center_x, center_y, img_cols_, img_rows_);
-        target.is_tracked = false;
-        return;
+        return false;
     }
 
-    // 打印检测框信息
-    // ROS_DEBUG("Processing detection box: center=(%.2f, %.2f), size=(%.2f, %.2f)", 
-    //           center_x, center_y, size_x, size_y);
-
-    // 计算边界框的整数坐标，确保在图像范围内
     int top_x = static_cast<int>(std::max(0.0, std::round(center_x - size_x/2.0)));
     int top_y = static_cast<int>(std::max(0.0, std::round(center_y - size_y/2.0)));
     int width = static_cast<int>(std::min(static_cast<double>(img_cols_ - top_x), std::round(size_x)));
     int height = static_cast<int>(std::min(static_cast<double>(img_rows_ - top_y), std::round(size_y)));
 
-    // 验证计算后的边界框
-    if (width <= 0 || height <= 0 || 
-        top_x + width > img_cols_ || top_y + height > img_rows_) {
-        ROS_ERROR("Invalid calculated bbox: (%d, %d, %d, %d) for image size %dx%d",
-                 top_x, top_y, width, height, img_cols_, img_rows_);
-        target.is_tracked = false;
-        return;
+    if (width <= 0 || height <= 0) {
+        return false;
     }
-
-    // ROS_DEBUG("Calculated bbox: (%d, %d, %d, %d)", top_x, top_y, width, height);
-
-    // 收集深度值，添加边界检查
-    std::vector<double> depth_values;
-    std::vector<double> weights;
-    const double inv_factor = 1.0 / depth_scale_;
     
-    try {
-        // 添加深度值统计
-        double min_depth = std::numeric_limits<double>::max();
-        double max_depth = std::numeric_limits<double>::min();
-        double sum_depth = 0.0;
-        int valid_count = 0;
-        
-        for(int v = top_y; v < top_y + height; ++v) {
-            for(int u = top_x; u < top_x + width; ++u) {
-                if (v >= 0 && v < depth_image.rows && u >= 0 && u < depth_image.cols) {
-                    uint16_t depth_raw = depth_image.at<uint16_t>(v, u);
-                    double depth = depth_raw * inv_factor;
-                    
-                    if(depth >= depth_min_value_ && depth <= depth_max_value_) {
-                        // 更新统计信息
-                        min_depth = std::min(min_depth, depth);
-                        max_depth = std::max(max_depth, depth);
-                        sum_depth += depth;
-                        valid_count++;
-                        
-                        // 计算高斯权重
-                        double dx = (u - (top_x + width/2.0)) / (width/2.0);
-                        double dy = (v - (top_y + height/2.0)) / (height/2.0);
-                        double weight = std::exp(-(dx*dx + dy*dy));
-                        
-                        depth_values.push_back(depth);
-                        weights.push_back(weight);
-                    }
-                }
+    std::vector<double> depth_values;
+    const double inv_factor = 1.0 / depth_scale_;
+    double min_depth = std::numeric_limits<double>::max();
+    double max_depth = std::numeric_limits<double>::min();
+
+    for(int v = top_y; v < top_y + height; ++v) {
+        for(int u = top_x; u < top_x + width; ++u) {
+            uint16_t depth_raw = depth_image.at<uint16_t>(v, u);
+            double depth = depth_raw * inv_factor;
+            if(depth >= depth_min_value_ && depth <= depth_max_value_) {
+                depth_values.push_back(depth);
+                min_depth = std::min(min_depth, depth);
+                max_depth = std::max(max_depth, depth);
             }
         }
-
-
-        if(depth_values.empty()) {
-            ROS_WARN("No valid depth values in detection box!");
-            target.is_tracked = false;
-            return;
-        }
-
-        // 计算加权中值深度
-        double depth_median, mad;
-        calculateMAD(depth_values, weights, depth_median, mad);
-        
-
-        // ----------------中心点估计-----------------
-        // 投影到3D空间（相机坐标系）
-        Eigen::Vector3d center_cam;
-        center_cam(0) = (center_x - cx_) * depth_median / fx_;  // 相机系：x向右
-        center_cam(1) = (center_y - cy_) * depth_median / fy_;  // 相机系：y向下
-        center_cam(2) = depth_median;                           // 相机系：z向前
-
-    
-        // 转换到机体系（调整坐标轴对应关系）
-        // 相机系 -> 机体系：x(右) -> -y(左), y(下) -> -z(上), z(前) -> x(前)
-        Eigen::Vector3d center_body;
-        center_body(0) = center_cam(2);   // 相机z轴 -> 机体x轴（前）
-        center_body(1) = -center_cam(0);  // 相机x轴 -> 机体y轴（左）
-        center_body(2) = -center_cam(1);  // 相机y轴 -> 机体z轴（上）
-
-        ROS_INFO("center_body: (%.2f, %.2f, %.2f)", center_body(0), center_body(1), center_body(2));
-        //----------------尺寸估计-----------------
-        // 估计目标尺寸 - 使用检测框的像素尺寸动态计算
-        double confidence = 0.8;  // 使用默认置信度
-        // 从像素尺寸和深度反投影，计算x,y方向上的尺寸（米）
-        double x_width = (size_x / fx_) * center_cam(2) * confidence;
-        double y_width = (size_y / fy_) * center_cam(2) * confidence;
-        // z方向的尺寸使用ROI内深度的极差来估算
-        double z_width = (max_depth - min_depth) * confidence;
-
-        // 对尺寸进行约束，不超过参数中设置的最大值
-        x_width = std::min(x_width, target_size_x_);
-        z_width = std::min(z_width, target_size_z_);
-        y_width = std::min(y_width, target_size_y_);
-
-        // 转换尺寸到机体系（调整坐标轴对应关系）
-        Eigen::Vector3d size_body;
-        size_body(0) = z_width;   // 相机z轴 -> 机体x轴（前）
-        size_body(1) = x_width;   // 相机x轴 -> 机体y轴（左）
-        size_body(2) = y_width;   // 相机y轴 -> 机体z轴（上）
-
-        // 转换到世界坐标系
-        Eigen::Vector3d world_center, world_size;
-        transformBBox(center_body, size_body,
-                     position_, orientation_,  // 使用机体的位置和方向
-                     world_center, world_size);
-
-        ROS_INFO("world_center: (%.2f, %.2f, %.2f)", world_center(0), world_center(1), world_center(2));
-        // 初始化目标
-        target.id = next_target_id_++;
-        target.x = world_center(0);
-        target.y = world_center(1);
-        target.z = world_center(2);
-        target.x_width = x_width;
-        target.y_width = y_width;
-        target.z_width = z_width;
-        target.is_human = false;
-        target.is_dynamic = true;
-        target.is_tracked = true;
-        target.timestamp = ros::Time::now();
-        target.last_seen = ros::Time::now();
-        target.position_history.push_back(world_center);
-        target.time_history.push_back(target.timestamp);
-        if(target.position_history.size() > max_history_size_) {
-            target.position_history.pop_front();
-            target.time_history.pop_front();
-        }
-
-    } catch (const std::exception& e) {
-        ROS_ERROR("Exception in estimateTarget3D: %s", e.what());
-    } catch (...) {
-        ROS_ERROR("Unknown exception in estimateTarget3D");
     }
+
+    if(depth_values.empty()) {
+        return false;
+    }
+
+    std::sort(depth_values.begin(), depth_values.end());
+    double depth_median = depth_values[depth_values.size()/2];
+
+    Eigen::Vector3d center_cam;
+    center_cam(0) = (center_x - cx_) * depth_median / fx_;
+    center_cam(1) = (center_y - cy_) * depth_median / fy_;
+    center_cam(2) = depth_median;
+
+    Eigen::Vector3d center_body;
+    center_body(0) = center_cam(2);
+    center_body(1) = -center_cam(0);
+    center_body(2) = -center_cam(1);
+
+    double x_width = (size_x / fx_) * center_cam(2);
+    double y_width = (size_y / fy_) * center_cam(2);
+    double z_width = (max_depth - min_depth);
+    
+    size_body(0) = z_width;
+    size_body(1) = x_width;
+    size_body(2) = y_width;
+
+    Eigen::Vector3d dummy_size;
+    transformBBox(center_body, size_body, position_, orientation_, world_center, dummy_size);
+    
+    return true;
 }
 
 void TargetDetector::updateTargetTracking() {
-    // Predict positions for all tracked targets
-    predictTargetPositions();
-    
-    // Update tracking information
-    for(auto& pair : tracked_targets_) {
-        Target3D& target = pair.second;
-        
-        // Remove old targets
-        if((ros::Time::now() - target.timestamp).toSec() > 2.0) {
-            target.is_tracked = false;
-        }
-        
-        // Publish trajectory
-        if(target.is_tracked) {
-            publishTrajectory(target);
-        }
-    }
-}
-
-void TargetDetector::predictTargetPositions() {
     ros::Time current_time = ros::Time::now();
-    
-    for(auto& pair : tracked_targets_) {
-        Target3D& target = pair.second;
-        if(!target.is_tracked) continue;
+    for(auto it = tracked_targets_.begin(); it != tracked_targets_.end(); ) {
+        Target3D& target = it->second;
         
-        double dt = (current_time - target.timestamp).toSec();
-        if(dt > 0) {
-            predictKalmanFilter(target, dt);
+        if((current_time - target.last_seen).toSec() > 2.0) {
+            target.is_tracked = false;
+            it = tracked_targets_.erase(it);
+        } else {
+            if (target.kf_tracker) {
+                TrackerState predicted_state = target.kf_tracker->predict();
+                target.x = predicted_state.position(0);
+                target.y = predicted_state.position(1);
+                target.z = predicted_state.position(2);
+                target.vx = predicted_state.velocity(0);
+                target.vy = predicted_state.velocity(1);
+                target.vz = predicted_state.velocity(2);
+            }
+            ++it;
         }
     }
-}
-
-void TargetDetector::initializeKalmanFilter(Target3D& target) {
-    // Initialize state vector [x, y, z, vx, vy, vz, ax, ay, az]
-    target.state.setZero();
-    target.state(0) = target.x;
-    target.state(1) = target.y;
-    target.state(2) = target.z;
-    
-    // Initialize covariance matrix
-    target.covariance.setIdentity();
-    target.covariance *= 0.1;  // Initial uncertainty
-}
-
-void TargetDetector::predictKalmanFilter(Target3D& target, double dt) {
-    // State transition matrix
-    Eigen::Matrix<double, 9, 9> F;
-    F.setIdentity();
-    F.block<3,3>(0,3) = Eigen::Matrix3d::Identity() * dt;
-    F.block<3,3>(0,6) = Eigen::Matrix3d::Identity() * 0.5 * dt * dt;
-    F.block<3,3>(3,6) = Eigen::Matrix3d::Identity() * dt;
-    
-    // Process noise
-    Eigen::Matrix<double, 9, 9> Q;
-    Q.setIdentity();
-    Q.block<3,3>(0,0) *= 0.1;  // Position noise
-    Q.block<3,3>(3,3) *= 0.1;  // Velocity noise
-    Q.block<3,3>(6,6) *= 0.1;  // Acceleration noise
-    Q *= dt;
-    
-    // Predict
-    target.state = F * target.state;
-    target.covariance = F * target.covariance * F.transpose() + Q;
-    
-    // Update target state
-    target.x = target.state(0);
-    target.y = target.state(1);
-    target.z = target.state(2);
-    target.vx = target.state(3);
-    target.vy = target.state(4);
-    target.vz = target.state(5);
-    target.ax = target.state(6);
-    target.ay = target.state(7);
-    target.az = target.state(8);
-}
-
-void TargetDetector::updateKalmanFilter(Target3D& target, const Eigen::Vector3d& measurement) {
-    // Measurement matrix
-    Eigen::Matrix<double, 3, 9> H;
-    H.setZero();
-    H.block<3,3>(0,0) = Eigen::Matrix3d::Identity();
-    
-    // Measurement noise
-    Eigen::Matrix3d R;
-    R.setIdentity();
-    R *= 0.1;  // Measurement noise
-    
-    // Kalman gain
-    Eigen::Matrix<double, 9, 3> K = target.covariance * H.transpose() * 
-                                  (H * target.covariance * H.transpose() + R).inverse();
-    
-    // Update
-    Eigen::Vector3d innovation = measurement - H * target.state;
-    target.state = target.state + K * innovation;
-    target.covariance = (Eigen::Matrix<double, 9, 9>::Identity() - K * H) * target.covariance;
 }
 
 void TargetDetector::publishVisualization() {
@@ -827,47 +646,6 @@ void TargetDetector::publishTrajectory(const Target3D& target) {
     
     markers.markers.push_back(marker);
     trajectory_pub_.publish(markers);
-}
-
-void TargetDetector::calculateMAD(const std::vector<double>& values,
-                                const std::vector<double>& weights,
-                                double& median,
-                                double& mad) {
-    if(values.empty()) {
-        median = 0.0;
-        mad = 0.0;
-        return;
-    }
-    
-    // Calculate weighted median
-    std::vector<std::pair<double, double>> value_weight_pairs;
-    for(size_t i = 0; i < values.size(); ++i) {
-        value_weight_pairs.push_back({values[i], weights[i]});
-    }
-    std::sort(value_weight_pairs.begin(), value_weight_pairs.end());
-    
-    double total_weight = 0.0;
-    for(const auto& pair : value_weight_pairs) {
-        total_weight += pair.second;
-    }
-    
-    double half_weight = total_weight / 2.0;
-    double current_weight = 0.0;
-    for(const auto& pair : value_weight_pairs) {
-        current_weight += pair.second;
-        if(current_weight >= half_weight) {
-            median = pair.first;
-            break;
-        }
-    }
-    
-    // Calculate MAD
-    std::vector<double> deviations;
-    for(size_t i = 0; i < values.size(); ++i) {
-        deviations.push_back(std::abs(values[i] - median) * weights[i]);
-    }
-    std::sort(deviations.begin(), deviations.end());
-    mad = deviations[deviations.size() / 2];
 }
 
 void TargetDetector::transformBBox(const Eigen::Vector3d& center,

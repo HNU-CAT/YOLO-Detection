@@ -1,7 +1,14 @@
 
 # YOLO-Detection
 
-使用YOLO通过RBG图和深度图获得目标位置的三维位置
+<div align="center">
+  <video width="60%" controls>
+    <source src="figs/yolo-detect.mp4" type="video/mp4">
+    您的浏览器不支持视频标签。
+  </video>
+  <p>使用YOLO通过RBG图和深度图获得目标位置的三维位置</p>
+</div>
+
 
 <div align="center">
   <img src="https://github.com/user-attachments/assets/e6ff846b-af22-4c0c-a3eb-62df64911c1e" alt="YOLO检测示例" width="60%">
